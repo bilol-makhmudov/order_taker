@@ -71,6 +71,7 @@ class _OrdersPageState extends State<OrdersPage> {
           appBar: AppBar(title: const Text('My Orders')),
           floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
           floatingActionButton: _HoldToTalkButton(
+            isProcessing: vm.isProcessing,
             isListening: vm.isListening,
             pressed: _pressed,
             onPressStart: () async {
@@ -109,53 +110,93 @@ class _OrdersPageState extends State<OrdersPage> {
     final candidates = line.match.candidates;
     if (candidates.isEmpty) return;
 
-    final selected = await showModalBottomSheet<Product>(
+    final selected = await showModalBottomSheet<List<Product>>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (ctx) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Which product did you mean?', style: Theme.of(ctx).textTheme.titleMedium),
-                const SizedBox(height: 6),
-                Text('Heard: "${line.match.query}"  •  Qty: ${line.quantity}'),
-                const SizedBox(height: 12),
-                ...candidates.map((c) {
-                  final p = c.product;
-                  return ListTile(
-                    title: Text(p.canonicalName),
-                    subtitle: Text('${p.category} • score ${c.score}'),
-                    onTap: () => Navigator.of(ctx).pop(p),
-                  );
-                }),
-                const SizedBox(height: 6),
-                TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(null),
-                  child: const Text('Cancel'),
+        final chosen = <Product>{};
+
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Select product(s)', style: Theme.of(ctx).textTheme.titleMedium),
+                    const SizedBox(height: 6),
+                    Text('Heard: "${line.match.query}"  •  Qty: ${line.quantity}'),
+                    const SizedBox(height: 12),
+                    Flexible(
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: candidates.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (ctx, i) {
+                          final c = candidates[i];
+                          final p = c.product;
+                          final checked = chosen.contains(p);
+
+                          return CheckboxListTile(
+                            value: checked,
+                            controlAffinity: ListTileControlAffinity.leading,
+                            title: Text(p.canonicalName),
+                            subtitle: Text('${p.category} • score ${c.score}'),
+                            onChanged: (v) {
+                              setModalState(() {
+                                if (v == true) {
+                                  chosen.add(p);
+                                } else {
+                                  chosen.remove(p);
+                                }
+                              });
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(<Product>[]),
+                          child: const Text('Cancel'),
+                        ),
+                        const Spacer(),
+                        FilledButton(
+                          onPressed: chosen.isEmpty ? null : () => Navigator.of(ctx).pop(chosen.toList(growable: false)),
+                          child: Text(chosen.isEmpty ? 'Select' : 'Add (${chosen.length})'),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
 
-    if (selected != null) vm.applyDisambiguation(line, selected);
+    if (selected != null && selected.isNotEmpty) {
+      vm.applyDisambiguationMulti(line, selected);
+    }
   }
 }
 
 class _HoldToTalkButton extends StatelessWidget {
   final bool isListening;
+  final bool isProcessing;
   final bool pressed;
   final Future<void> Function() onPressStart;
   final Future<void> Function() onPressEnd;
 
   const _HoldToTalkButton({
     required this.isListening,
+    required this.isProcessing,
     required this.pressed,
     required this.onPressStart,
     required this.onPressEnd,
@@ -163,34 +204,50 @@ class _HoldToTalkButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bg = pressed ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.secondaryContainer;
+    final fg = pressed ? Theme.of(context).colorScheme.onPrimary : Theme.of(context).colorScheme.onSecondaryContainer;
+
     return GestureDetector(
-      onTapDown: (_) => onPressStart(),
-      onTapUp: (_) => onPressEnd(),
-      onTapCancel: () => onPressEnd(),
+      onTapDown: isProcessing ? null : (_) => onPressStart(),
+      onTapUp: isProcessing ? null : (_) => onPressEnd(),
+      onTapCancel: isProcessing ? null : () => onPressEnd(),
       behavior: HitTestBehavior.opaque,
       child: AnimatedScale(
         duration: const Duration(milliseconds: 80),
         scale: pressed ? 0.92 : 1.0,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 120),
-          width: 64,
-          height: 64,
+          width: 84,
+          height: 84,
           decoration: BoxDecoration(
-            color: pressed ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.secondaryContainer,
+            color: bg,
             shape: BoxShape.circle,
             boxShadow: [
               BoxShadow(
                 blurRadius: pressed ? 10 : 16,
                 spreadRadius: pressed ? 0 : 2,
-                color: Colors.black.withOpacity(0.18),
+                color: Colors.black.withValues(alpha: 0.18),
                 offset: const Offset(0, 6),
               ),
             ],
           ),
-          child: Icon(
-            isListening ? Icons.mic : Icons.mic_none,
-            color: pressed ? Theme.of(context).colorScheme.onPrimary : Theme.of(context).colorScheme.onSecondaryContainer,
-            size: 30,
+          child: Center(
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 140),
+              child: isProcessing
+                  ? SizedBox(
+                key: const ValueKey('spinner'),
+                width: 26,
+                height: 26,
+                child: CircularProgressIndicator(strokeWidth: 2.6, valueColor: AlwaysStoppedAnimation<Color>(fg)),
+              )
+                  : Icon(
+                key: const ValueKey('icon'),
+                isListening ? Icons.mic : Icons.mic_none,
+                color: fg,
+                size: 30,
+              ),
+            ),
           ),
         ),
       ),

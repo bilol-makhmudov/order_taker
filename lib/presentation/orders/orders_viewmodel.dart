@@ -24,6 +24,8 @@ class OrdersNeedDisambiguation extends OrdersUiEvent {
 }
 
 class OrdersViewModel extends ChangeNotifier {
+  static const int autoAddScoreThreshold = 80;
+
   final OrderRepository _orderRepo;
   final VoskService _vosk;
   final VoiceOrderParser _parser;
@@ -36,6 +38,9 @@ class OrdersViewModel extends ChangeNotifier {
 
   bool _isListening = false;
   bool get isListening => _isListening;
+
+  bool _isProcessing = false;
+  bool get isProcessing => _isProcessing;
 
   OrdersViewModel({
     required OrderRepository orderRepository,
@@ -58,7 +63,7 @@ class OrdersViewModel extends ChangeNotifier {
   void dec(OrderItem item) => _orderRepo.removeProduct(item.product.id, quantity: 1);
 
   Future<void> startVoice() async {
-    if (_isListening) return;
+    if (_isListening || _isProcessing) return;
 
     final mic = await Permission.microphone.request();
     if (!mic.isGranted) {
@@ -71,7 +76,7 @@ class OrdersViewModel extends ChangeNotifier {
 
     try {
       await _vosk.start();
-    } catch (e) {
+    } catch (_) {
       _isListening = false;
       notifyListeners();
       _events.add(OrdersShowMessage('Voice start failed.'));
@@ -88,50 +93,58 @@ class OrdersViewModel extends ChangeNotifier {
     }
   }
 
-  void applyDisambiguation(VoiceOrderLine line, Product selected) {
-    _orderRepo.addProduct(selected, quantity: line.quantity);
-    _events.add(OrdersShowMessage('Added: ${line.quantity} × ${selected.canonicalName}'));
+  void applyDisambiguationMulti(VoiceOrderLine line, List<Product> selected) {
+    if (selected.isEmpty) return;
+
+    for (final p in selected) {
+      _orderRepo.addProduct(p, quantity: line.quantity);
+    }
+
+    if (selected.length == 1) {
+      _events.add(OrdersShowMessage('Added: ${line.quantity} × ${selected.first.canonicalName}'));
+    } else {
+      _events.add(OrdersShowMessage('Added ${selected.length} items (qty ${line.quantity} each).'));
+    }
   }
 
-  void _onSpeechResult(SpeechResult r) {
+  void _setProcessing(bool v) {
+    if (_isProcessing == v) return;
+    _isProcessing = v;
+    notifyListeners();
+  }
+
+  Future<void> _onSpeechResult(SpeechResult r) async {
     if (!_isListening) return;
     if (!r.isFinal) return;
 
-    final parsed = _parser.parse(r.text, _products);
+    _setProcessing(true);
 
-    if (parsed.action != VoiceOrderActionType.addItems) return;
+    try {
+      final parsed = _parser.parse(r.text, _products);
+      if (parsed.action != VoiceOrderActionType.addItems) return;
 
-    var addedAny = false;
-    var ambiguousAny = false;
+      var addedAny = false;
+      var askedAny = false;
 
-    for (final line in parsed.lines) {
-      final match = line.match;
+      for (final line in parsed.lines) {
+        final best = line.match.best;
+        if (best != null && best.score >= autoAddScoreThreshold) {
+          _orderRepo.addProduct(best.product, quantity: line.quantity);
+          addedAny = true;
+          continue;
+        }
 
-      if (line.product != null) {
-        _orderRepo.addProduct(line.product!, quantity: line.quantity);
-        addedAny = true;
-        continue;
+        if (line.match.candidates.isNotEmpty) {
+          _events.add(OrdersNeedDisambiguation(line));
+          askedAny = true;
+        }
       }
 
-      if (match.candidates.isEmpty) continue;
-
-      final best = match.best;
-      if (best == null) continue;
-
-      if (match.isConfident) {
-        _orderRepo.addProduct(best.product, quantity: line.quantity);
-        addedAny = true;
-        continue;
+      if (!addedAny && !askedAny) {
+        _events.add(OrdersShowMessage('Could not confidently match any product.'));
       }
-
-      if (best.score >= 55) {
-        ambiguousAny = true;
-        _events.add(OrdersNeedDisambiguation(line));
-      }
-    }
-
-    if (!addedAny && !ambiguousAny) {
-      _events.add(OrdersShowMessage('Could not confidently match any product.'));
+    } finally {
+      _setProcessing(false);
     }
   }
 
