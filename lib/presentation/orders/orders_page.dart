@@ -19,6 +19,7 @@ class _OrdersPageState extends State<OrdersPage> {
   OrdersViewModel? _vm;
   StreamSubscription<OrdersUiEvent>? _sub;
   bool _initialized = false;
+  bool _pressed = false;
 
   @override
   void didChangeDependencies() {
@@ -67,28 +68,27 @@ class _OrdersPageState extends State<OrdersPage> {
         final items = draft.items;
 
         return Scaffold(
-          appBar: AppBar(
-            title: const Text('My Orders'),
-            actions: [
-              IconButton(
-                tooltip: vm.isListening ? 'Stop voice' : 'Start voice',
-                icon: Icon(vm.isListening ? Icons.mic_off : Icons.mic),
-                onPressed: () => vm.isListening ? vm.stopVoice() : vm.startVoice(),
-              ),
-            ],
+          appBar: AppBar(title: const Text('My Orders')),
+          floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+          floatingActionButton: _HoldToTalkButton(
+            isListening: vm.isListening,
+            pressed: _pressed,
+            onPressStart: () async {
+              setState(() => _pressed = true);
+              await vm.startVoice();
+            },
+            onPressEnd: () async {
+              setState(() => _pressed = false);
+              await vm.stopVoice();
+            },
           ),
           body: Column(
             children: [
-              if (vm.isListening || vm.lastPartial.isNotEmpty || vm.lastFinal.isNotEmpty)
-                _VoicePanel(
-                  isListening: vm.isListening,
-                  partial: vm.lastPartial,
-                  finalText: vm.lastFinal,
-                ),
               Expanded(
                 child: items.isEmpty
-                    ? const Center(child: Text('Draft is empty. Add items from Products or use voice.'))
+                    ? const Center(child: Text('Draft is empty. Add items from Products or hold mic to speak.'))
                     : ListView.separated(
+                  padding: const EdgeInsets.only(bottom: 96),
                   itemCount: items.length,
                   separatorBuilder: (_, _) => const Divider(height: 1),
                   itemBuilder: (context, i) => _OrderItemTile(
@@ -97,13 +97,6 @@ class _OrdersPageState extends State<OrdersPage> {
                     onDec: () => vm.dec(items[i]),
                   ),
                 ),
-              ),
-              _BottomBar(
-                total: draft.total,
-                hasItems: items.isNotEmpty,
-                onClear: vm.clearDraft,
-                onSubmit: vm.submitDraft,
-                onUndo: vm.undoLastLineItem,
               ),
             ],
           ),
@@ -151,43 +144,55 @@ class _OrdersPageState extends State<OrdersPage> {
       },
     );
 
-    if (selected != null) {
-      vm.applyDisambiguation(line, selected);
-    }
+    if (selected != null) vm.applyDisambiguation(line, selected);
   }
 }
 
-class _VoicePanel extends StatelessWidget {
+class _HoldToTalkButton extends StatelessWidget {
   final bool isListening;
-  final String partial;
-  final String finalText;
+  final bool pressed;
+  final Future<void> Function() onPressStart;
+  final Future<void> Function() onPressEnd;
 
-  const _VoicePanel({required this.isListening, required this.partial, required this.finalText});
+  const _HoldToTalkButton({
+    required this.isListening,
+    required this.pressed,
+    required this.onPressStart,
+    required this.onPressEnd,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final show = partial.isNotEmpty ? partial : finalText;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-      margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-      decoration: BoxDecoration(
-        border: Border.all(color: Theme.of(context).dividerColor),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Icon(isListening ? Icons.mic : Icons.mic_none),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              show.isEmpty ? (isListening ? 'Listening...' : '') : show,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
+    return GestureDetector(
+      onTapDown: (_) => onPressStart(),
+      onTapUp: (_) => onPressEnd(),
+      onTapCancel: () => onPressEnd(),
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedScale(
+        duration: const Duration(milliseconds: 80),
+        scale: pressed ? 0.92 : 1.0,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(
+            color: pressed ? Theme.of(context).colorScheme.primary : Theme.of(context).colorScheme.secondaryContainer,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                blurRadius: pressed ? 10 : 16,
+                spreadRadius: pressed ? 0 : 2,
+                color: Colors.black.withOpacity(0.18),
+                offset: const Offset(0, 6),
+              ),
+            ],
           ),
-        ],
+          child: Icon(
+            isListening ? Icons.mic : Icons.mic_none,
+            color: pressed ? Theme.of(context).colorScheme.onPrimary : Theme.of(context).colorScheme.onSecondaryContainer,
+            size: 30,
+          ),
+        ),
       ),
     );
   }
@@ -212,50 +217,6 @@ class _OrderItemTile extends StatelessWidget {
           Text('${item.quantity}', style: Theme.of(context).textTheme.titleMedium),
           IconButton(icon: const Icon(Icons.add_circle_outline), onPressed: onInc),
         ],
-      ),
-    );
-  }
-}
-
-class _BottomBar extends StatelessWidget {
-  final double total;
-  final bool hasItems;
-  final VoidCallback onClear;
-  final VoidCallback onSubmit;
-  final VoidCallback onUndo;
-
-  const _BottomBar({
-    required this.total,
-    required this.hasItems,
-    required this.onClear,
-    required this.onSubmit,
-    required this.onUndo,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      top: false,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-        decoration: BoxDecoration(
-          border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text('Total: ${total.toStringAsFixed(0)}', style: Theme.of(context).textTheme.titleMedium),
-            ),
-            IconButton(
-              tooltip: 'Undo last',
-              onPressed: hasItems ? onUndo : null,
-              icon: const Icon(Icons.undo),
-            ),
-            TextButton(onPressed: hasItems ? onClear : null, child: const Text('Clear')),
-            const SizedBox(width: 8),
-            FilledButton(onPressed: hasItems ? onSubmit : null, child: const Text('Submit')),
-          ],
-        ),
       ),
     );
   }

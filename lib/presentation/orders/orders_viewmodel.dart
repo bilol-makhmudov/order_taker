@@ -15,13 +15,11 @@ sealed class OrdersUiEvent {}
 
 class OrdersShowMessage extends OrdersUiEvent {
   final String message;
-
   OrdersShowMessage(this.message);
 }
 
 class OrdersNeedDisambiguation extends OrdersUiEvent {
   final VoiceOrderLine line;
-
   OrdersNeedDisambiguation(this.line);
 }
 
@@ -36,9 +34,8 @@ class OrdersViewModel extends ChangeNotifier {
 
   StreamSubscription<SpeechResult>? _speechSub;
 
-  String _lastPartial = '';
-  String _lastFinal = '';
   bool _isListening = false;
+  bool get isListening => _isListening;
 
   OrdersViewModel({
     required OrderRepository orderRepository,
@@ -56,36 +53,19 @@ class OrdersViewModel extends ChangeNotifier {
   Order get currentOrder => _orderRepo.currentOrder;
   List<Order> get orders => _orderRepo.orders;
 
-  bool get isListening => _isListening;
-  String get lastPartial => _lastPartial;
-  String get lastFinal => _lastFinal;
-
   void add(Product p) => _orderRepo.addProduct(p, quantity: 1);
   void inc(OrderItem item) => _orderRepo.addProduct(item.product, quantity: 1);
   void dec(OrderItem item) => _orderRepo.removeProduct(item.product.id, quantity: 1);
 
-  void clearDraft() => _orderRepo.clearCurrentOrder();
-
-  void submitDraft() {
-    final created = _orderRepo.submitCurrentOrder();
-    if (created.items.isEmpty) {
-      _events.add(OrdersShowMessage('Draft is empty.'));
-    } else {
-      _events.add(OrdersShowMessage('Order #${created.id} submitted.'));
-    }
-  }
-
   Future<void> startVoice() async {
     if (_isListening) return;
 
-    final status = await Permission.microphone.request();
-    if (!status.isGranted) {
+    final mic = await Permission.microphone.request();
+    if (!mic.isGranted) {
       _events.add(OrdersShowMessage('Microphone permission is required.'));
       return;
     }
 
-    _lastPartial = '';
-    _lastFinal = '';
     _isListening = true;
     notifyListeners();
 
@@ -94,7 +74,7 @@ class OrdersViewModel extends ChangeNotifier {
     } catch (e) {
       _isListening = false;
       notifyListeners();
-      _events.add(OrdersShowMessage('Voice start failed: $e'));
+      _events.add(OrdersShowMessage('Voice start failed.'));
     }
   }
 
@@ -113,54 +93,45 @@ class OrdersViewModel extends ChangeNotifier {
     _events.add(OrdersShowMessage('Added: ${line.quantity} × ${selected.canonicalName}'));
   }
 
-  void undoLastLineItem() {
-    final items = _orderRepo.currentOrder.items;
-    if (items.isEmpty) {
-      _events.add(OrdersShowMessage('Nothing to undo.'));
-      return;
-    }
-    final last = items.last;
-    _orderRepo.removeProduct(last.product.id, quantity: last.quantity);
-    _events.add(OrdersShowMessage('Removed: ${last.product.canonicalName}'));
-  }
-
   void _onSpeechResult(SpeechResult r) {
     if (!_isListening) return;
-
-    if (!r.isFinal) {
-      _lastPartial = r.text;
-      notifyListeners();
-      return;
-    }
-
-    _lastFinal = r.text;
-    _lastPartial = '';
-    notifyListeners();
+    if (!r.isFinal) return;
 
     final parsed = _parser.parse(r.text, _products);
 
-    switch (parsed.action) {
-      case VoiceOrderActionType.undoLast:
-        undoLastLineItem();
-        break;
-      case VoiceOrderActionType.clearDraft:
-        clearDraft();
-        _events.add(OrdersShowMessage('Draft cleared.'));
-        break;
-      case VoiceOrderActionType.addItems:
-        for (final line in parsed.lines) {
-          if (line.product != null) {
-            _orderRepo.addProduct(line.product!, quantity: line.quantity);
-          } else if (line.match.candidates.isNotEmpty) {
-            _events.add(OrdersNeedDisambiguation(line));
-          } else {
-            _events.add(OrdersShowMessage('No match for: "${line.match.query}"'));
-          }
-        }
-        break;
-      case VoiceOrderActionType.none:
-        _events.add(OrdersShowMessage('Could not understand.'));
-        break;
+    if (parsed.action != VoiceOrderActionType.addItems) return;
+
+    var addedAny = false;
+    var ambiguousAny = false;
+
+    for (final line in parsed.lines) {
+      final match = line.match;
+
+      if (line.product != null) {
+        _orderRepo.addProduct(line.product!, quantity: line.quantity);
+        addedAny = true;
+        continue;
+      }
+
+      if (match.candidates.isEmpty) continue;
+
+      final best = match.best;
+      if (best == null) continue;
+
+      if (match.isConfident) {
+        _orderRepo.addProduct(best.product, quantity: line.quantity);
+        addedAny = true;
+        continue;
+      }
+
+      if (best.score >= 55) {
+        ambiguousAny = true;
+        _events.add(OrdersNeedDisambiguation(line));
+      }
+    }
+
+    if (!addedAny && !ambiguousAny) {
+      _events.add(OrdersShowMessage('Could not confidently match any product.'));
     }
   }
 
