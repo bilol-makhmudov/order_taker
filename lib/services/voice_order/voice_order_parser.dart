@@ -22,10 +22,6 @@ class VoiceOrderParseResult {
     required this.normalizedText,
     required this.lines,
   });
-
-  bool get hasAdditions => action == VoiceOrderActionType.addItems && lines.isNotEmpty;
-
-  bool get hasAmbiguity => lines.any((x) => x.product == null && x.match.candidates.isNotEmpty);
 }
 
 class VoiceOrderParser {
@@ -43,24 +39,17 @@ class VoiceOrderParser {
       return VoiceOrderParseResult(action: VoiceOrderActionType.clearDraft, normalizedText: normalized, lines: const []);
     }
 
-    final chunks = _splitIntoChunks(normalized);
+    final extracted = _extractLines(normalized);
 
     final lines = <VoiceOrderLine>[];
-    for (final chunk in chunks) {
-      final trimmed = chunk.trim();
-      if (trimmed.isEmpty) continue;
-
-      final extracted = _extractQuantityAndPhrase(trimmed);
-      final qty = extracted.quantity;
-      final phrase = extracted.phrase;
-
+    for (final x in extracted) {
+      final phrase = x.phrase.trim();
       if (phrase.isEmpty) continue;
 
       final match = _matcher.matchOne(phrase, products, topN: 3);
-
       final selected = match.isConfident ? match.best?.product : null;
 
-      lines.add(VoiceOrderLine(quantity: qty, product: selected, match: match));
+      lines.add(VoiceOrderLine(quantity: x.quantity, product: selected, match: match));
     }
 
     if (lines.isEmpty) {
@@ -70,8 +59,51 @@ class VoiceOrderParser {
     return VoiceOrderParseResult(action: VoiceOrderActionType.addItems, normalizedText: normalized, lines: lines);
   }
 
+  List<_ExtractedLine> _extractLines(String normalized) {
+    final cleaned = normalized
+        .replaceAll(',', ' ')
+        .replaceAll(';', ' ')
+        .replaceAll(':', ' ')
+        .replaceAll(' ile ', ' ')
+        .replaceAll(' ve ', ' ')
+        .replaceAll(' artı ', ' ')
+        .replaceAll(' arti ', ' ')
+        .replaceAll(' ayrıca ', ' ')
+        .replaceAll(' ayrica ', ' ');
+
+    final tokens = cleaned.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
+    if (tokens.isEmpty) return const [];
+
+    final lines = <_ExtractedLine>[];
+
+    int? currentQty;
+    final currentPhrase = <String>[];
+
+    void flush() {
+      final qty = currentQty ?? 1;
+      final phrase = currentPhrase.where((x) => !_isFiller(x)).join(' ').trim();
+      if (phrase.isNotEmpty) lines.add(_ExtractedLine(quantity: qty, phrase: phrase));
+      currentQty = null;
+      currentPhrase.clear();
+    }
+
+    for (final t in tokens) {
+      final n = int.tryParse(t);
+      if (n != null && n > 0) {
+        if (currentPhrase.isNotEmpty) flush();
+        currentQty = n;
+        continue;
+      }
+
+      currentPhrase.add(t);
+    }
+
+    if (currentPhrase.isNotEmpty) flush();
+
+    return lines;
+  }
+
   bool _isUndo(String text) {
-    // Common Turkish undo phrases
     return text == 'iptal' ||
         text == 'geri al' ||
         text == 'son ekleneni sil' ||
@@ -80,7 +112,6 @@ class VoiceOrderParser {
   }
 
   bool _isClear(String text) {
-    // Clear draft order
     return text == 'temizle' ||
         text == 'siparişi temizle' ||
         text == 'siparis temizle' ||
@@ -89,60 +120,14 @@ class VoiceOrderParser {
         text == 'tumunu sil';
   }
 
-  List<String> _splitIntoChunks(String normalized) {
-    final replaced = normalized
-        .replaceAll(' ile ', ' ve ')
-        .replaceAll(' artı ', ' ve ')
-        .replaceAll(' arti ', ' ve ')
-        .replaceAll(' ayrıca ', ' ve ')
-        .replaceAll(' ayrica ', ' ve ');
-
-    return replaced.split(' ve ');
-  }
-
-  _QtyPhrase _extractQuantityAndPhrase(String chunk) {
-    // Patterns supported:
-    // - "2 su"
-    // - "2 tane su"
-    // - "su 2 tane" (limited support)
-    // - default quantity = 1
-
-    final parts = chunk.split(RegExp(r'\s+')).where((x) => x.isNotEmpty).toList();
-    if (parts.isEmpty) return const _QtyPhrase(quantity: 1, phrase: '');
-
-    // If first token is digit => quantity
-    final first = parts.first;
-    final q1 = int.tryParse(first);
-    if (q1 != null && q1 > 0) {
-      // Remove optional filler words after quantity
-      final rest = parts.skip(1).where((x) => !_isFiller(x)).toList();
-      return _QtyPhrase(quantity: q1, phrase: rest.join(' '));
-    }
-
-    // If chunk contains "... 2 tane" at end
-    if (parts.length >= 2) {
-      final last = parts.last;
-      final q2 = int.tryParse(last);
-      if (q2 != null && q2 > 0) {
-        final before = parts.take(parts.length - 1).where((x) => !_isFiller(x)).toList();
-        return _QtyPhrase(quantity: q2, phrase: before.join(' '));
-      }
-    }
-
-    // default
-    final phrase = parts.where((x) => !_isFiller(x)).join(' ');
-    return _QtyPhrase(quantity: 1, phrase: phrase);
-  }
-
   bool _isFiller(String token) {
-    // Turkish filler words that often appear in speech commands
     return token == 'tane' || token == 'adet' || token == 'bir' || token == 'lütfen' || token == 'lutfen';
   }
 }
 
-class _QtyPhrase {
+class _ExtractedLine {
   final int quantity;
   final String phrase;
 
-  const _QtyPhrase({required this.quantity, required this.phrase});
+  const _ExtractedLine({required this.quantity, required this.phrase});
 }
